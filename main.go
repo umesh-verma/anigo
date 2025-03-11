@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
-
 	"github.com/umesh-verma/anigo/streams"
-
 	"github.com/gocolly/colly"
 )
 
@@ -228,7 +226,7 @@ func getStreamingURL(episodeURL string) (string, error) {
 	// Process based on provider type
 	switch {
 	case strings.EqualFold(selected.Name, "Rumble"):
-		return streams.ProcessRumble(selected.EmbedURL)
+		return streams.processRumbleEmbed(selected.EmbedURL)
 	default:
 		return processGenericEmbed(selected.EmbedURL)
 
