@@ -1,4 +1,4 @@
-module anigo
+module github.com/umesh-verma/anigo
 
 go 1.24.1
 
