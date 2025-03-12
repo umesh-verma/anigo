@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/umesh-verma/anigo/player"
 	"github.com/umesh-verma/anigo/sources"
 	"github.com/umesh-verma/anigo/sources/wpanime"
 	"github.com/umesh-verma/anigo/streams" // Fix import path
@@ -71,6 +72,28 @@ func (i showItem) Title() string       { return i.title }
 func (i showItem) Description() string { return i.description }
 func (i showItem) FilterValue() string { return i.title }
 
+type providerItem struct {
+	name      string
+	embedURL  string
+	processor string
+}
+
+func (i providerItem) Title() string       { return i.name }
+func (i providerItem) Description() string { return fmt.Sprintf("Provider: %s", i.processor) }
+func (i providerItem) FilterValue() string { return i.name }
+
+type qualityItem struct {
+	resolution string
+	size       int
+	url        string
+}
+
+func (i qualityItem) Title() string {
+	return fmt.Sprintf("%s (%d MB)", i.resolution, i.size/1024/1024)
+}
+func (i qualityItem) Description() string { return i.url }
+func (i qualityItem) FilterValue() string { return i.resolution }
+
 type screen int
 
 const (
@@ -99,10 +122,15 @@ type Model struct {
 	spinner       spinner.Model
 	loading       bool
 	loadingMsg    string
+	providerList  list.Model
+	providers     []sources.StreamProvider
+	qualityList   list.Model
+	qualities     []streams.VideoData
+	player        *player.Player
 }
 
 // Change New to return *Model
-func New(sources map[string]sources.SourceProvider) *Model {
+func New(sources map[string]sources.SourceProvider, defaultPlayer string, playerPaths map[string]string) *Model {
 	items := make([]list.Item, 0, len(sources))
 	for id := range sources { // simplified range
 		items = append(items, sourceItem{
@@ -127,6 +155,14 @@ func New(sources map[string]sources.SourceProvider) *Model {
 	episodeList.Title = "Episodes"
 	episodeList.SetShowHelp(true)
 
+	providerList := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	providerList.Title = "Stream Providers"
+	providerList.SetShowHelp(true)
+
+	qualityList := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	qualityList.Title = "Available Qualities"
+	qualityList.SetShowHelp(true)
+
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700"))
@@ -141,6 +177,9 @@ func New(sources map[string]sources.SourceProvider) *Model {
 		episodeList:   episodeList,
 		spinner:       s,
 		loading:       false,
+		providerList:  providerList,
+		qualityList:   qualityList,
+		player:        player.New(defaultPlayer, playerPaths),
 	}
 }
 
@@ -162,6 +201,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) { // changed to pointer
 		m.err = msg
 		m.loading = false
 		return m, nil
+	case []streams.VideoData: // Add this case to handle video data
+		return m.updateQualityList(msg)
 	}
 
 	var cmd tea.Cmd
@@ -175,7 +216,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) { // changed to pointer
 	case providerList:
 		return m.updateProviderList(msg)
 	case qualityList:
-		m.list, cmd = m.list.Update(msg)
+		return m.updateQualityList(msg)
 	}
 
 	if cmd != nil {
@@ -393,13 +434,119 @@ func (m *Model) updateEpisodeList(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) updateProviderList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case []sources.StreamProvider:
+		m.providers = msg
+		items := make([]list.Item, len(msg))
+		for i, p := range msg {
+			items[i] = providerItem{
+				name:      p.Name,
+				embedURL:  p.EmbedURL,
+				processor: p.Processor,
+			}
+		}
+		m.providerList.Title = fmt.Sprintf("Stream Providers (%d)", len(msg))
+		m.providerList.SetItems(items)
+		m.loading = false
+
+		if m.width > 0 {
+			m.providerList.SetSize(m.width-4, m.height-6)
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.providerList.SetSize(m.width-4, m.height-6)
 		return m, nil
-		// Add more cases as needed
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			if i, ok := m.providerList.SelectedItem().(providerItem); ok {
+				m.currentScreen = qualityList
+				m.loading = true
+				m.loadingMsg = "Loading qualities..."
+				return m, m.processProvider(i)
+			}
+		case "esc":
+			m.currentScreen = episodeList
+			return m, nil
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		}
 	}
-	return m, nil
+
+	var cmd tea.Cmd
+	m.providerList, cmd = m.providerList.Update(msg)
+	return m, cmd
+}
+
+func (m *Model) processProvider(provider providerItem) tea.Cmd {
+	m.loading = true // Set loading state
+	return func() tea.Msg {
+		switch provider.processor {
+		case "rumble":
+			videos, err := streams.ProcessRumbleEmbed(provider.embedURL)
+			if err != nil {
+				return err
+			}
+			return videos
+		// Add other providers as needed...
+		default:
+			return fmt.Errorf("unsupported provider: %s", provider.processor)
+		}
+	}
+}
+
+func (m *Model) updateQualityList(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case []streams.VideoData:
+		m.qualities = msg
+		items := make([]list.Item, len(msg))
+		for i, q := range msg {
+			items[i] = qualityItem{
+				resolution: q.Resolution,
+				size:       q.Size,
+				url:        q.URL,
+			}
+		}
+		m.qualityList.Title = fmt.Sprintf("Available Qualities (%d)", len(msg))
+		m.qualityList.SetItems(items)
+		m.loading = false
+
+		// Make sure window size is set
+		if m.width > 0 {
+			m.qualityList.SetSize(m.width-4, m.height-6)
+		}
+		return m, nil
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			if i, ok := m.qualityList.SelectedItem().(qualityItem); ok {
+				// Play the video and quit
+				m.selected = &streams.VideoData{
+					URL:        i.url,
+					Size:       i.size,
+					Resolution: i.resolution,
+				}
+				return m, tea.Sequence(
+					func() tea.Msg {
+						err := m.player.Play(i.url)
+						if err != nil {
+							return fmt.Errorf("failed to play video: %v", err)
+						}
+						return nil
+					},
+					tea.Quit,
+				)
+			}
+		}
+	}
+
+	var cmd tea.Cmd
+	m.qualityList, cmd = m.qualityList.Update(msg)
+	return m, cmd
 }
 
 func (m *Model) View() string {
@@ -494,6 +641,50 @@ func (m *Model) View() string {
 		s.WriteString("\n")
 		s.WriteString(statusMessageStyle.Render("↑/↓: navigate • enter: watch episode • esc: back • q: quit"))
 
+		return docStyle.Render(s.String())
+
+	case providerList:
+		if len(m.providers) == 0 {
+			return docStyle.Render(
+				lipgloss.JoinVertical(lipgloss.Left,
+					titleStyle.Render("No stream providers found"),
+					"\nPress 'esc' to go back",
+				),
+			)
+		}
+
+		var s strings.Builder
+		s.WriteString(titleStyle.Render("Stream Providers"))
+		s.WriteString("\n\n")
+
+		listView := listStyle.Copy().
+			Width(m.width - 4).
+			Render(m.providerList.View())
+
+		s.WriteString(listView)
+		s.WriteString("\n")
+		s.WriteString(statusMessageStyle.Render("↑/↓: navigate • enter: select quality • esc: back • q: quit"))
+
+		return docStyle.Render(s.String())
+
+	case qualityList:
+		if len(m.qualities) == 0 {
+			return docStyle.Render(
+				lipgloss.JoinVertical(lipgloss.Left,
+					titleStyle.Render("No qualities available"),
+					"\nPress 'esc' to go back",
+				),
+			)
+		}
+
+		var s strings.Builder
+		s.WriteString(titleStyle.Render("Select Quality"))
+		s.WriteString("\n\n")
+		s.WriteString(listStyle.Copy().
+			Width(m.width - 4).
+			Render(m.qualityList.View()))
+		s.WriteString("\n")
+		s.WriteString(statusMessageStyle.Render("↑/↓: navigate • enter: select • esc: back • q: quit"))
 		return docStyle.Render(s.String())
 
 	default:

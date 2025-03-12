@@ -18,6 +18,10 @@ type Config struct {
 		BaseURL    string `yaml:"base_url"`
 		SearchPath string `yaml:"search_path"`
 	} `yaml:"sources"`
+	Player struct {
+		Default string            `yaml:"default"`
+		Paths   map[string]string `yaml:"paths"`
+	} `yaml:"player"`
 }
 
 func main() {
@@ -33,8 +37,8 @@ func main() {
 		}
 	}
 
-	// Start TUI
-	p := tea.NewProgram(tui.New(sources), tea.WithAltScreen())
+	// Start TUI with player config
+	p := tea.NewProgram(tui.New(sources, config.Player.Default, config.Player.Paths), tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v\n", err)

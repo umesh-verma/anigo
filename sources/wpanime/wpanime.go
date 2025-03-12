@@ -1,6 +1,7 @@
 package wpanime
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync"
@@ -96,33 +97,114 @@ func (w *WPAnimeSource) GetEpisodes(showURL string) ([]sources.EpisodeInfo, erro
 	return episodes, nil
 }
 
+type mirrorOption struct {
+	label string
+	value string
+}
+
+func cleanEmbedURL(rawURL string) string {
+	if strings.HasPrefix(rawURL, "//") {
+		return "https:" + rawURL
+	}
+	if !strings.HasPrefix(rawURL, "http") {
+		return "https://" + rawURL
+	}
+	return rawURL
+}
+
+func extractEmbedURL(decodedStr string) string {
+	srcIndex := strings.Index(decodedStr, "src=")
+	if srcIndex == -1 {
+		return ""
+	}
+
+	// Find quote character
+	quoteChar := byte('"')
+	if srcIndex+5 < len(decodedStr) && decodedStr[srcIndex+4] == '\'' {
+		quoteChar = '\''
+	}
+
+	// Extract URL between quotes
+	startIndex := srcIndex + 5
+	endIndex := strings.IndexByte(decodedStr[startIndex:], quoteChar)
+	if endIndex == -1 {
+		return ""
+	}
+
+	return cleanEmbedURL(decodedStr[startIndex : startIndex+endIndex])
+}
+
+func detectProvider(embedURL, label string) (name, processor string) {
+	urlLower := strings.ToLower(embedURL)
+	switch {
+	case strings.Contains(urlLower, "rumble.com"):
+		return "Rumble", "rumble"
+	case strings.Contains(urlLower, "youtube.com"), strings.Contains(urlLower, "youtu.be"):
+		return "YouTube", "youtube"
+	case strings.Contains(urlLower, "dailymotion.com"):
+		return "Dailymotion", "dailymotion"
+	case strings.Contains(urlLower, "vimeo.com"):
+		return "Vimeo", "vimeo"
+	default:
+		return label, "default"
+	}
+}
+
 func (w *WPAnimeSource) GetStreamProviders(episodeURL string) ([]sources.StreamProvider, error) {
 	c := colly.NewCollector()
+	var mirrors []mirrorOption
 	providers := []sources.StreamProvider{}
 
 	c.OnRequest(func(r *colly.Request) {
 		logger.Logger.Printf("[Providers] URL: %s\n", r.URL.String())
 	})
 
-	c.OnHTML("div.video-players iframe", func(e *colly.HTMLElement) {
-		src := e.Attr("src")
-		if src != "" {
-			provider := "unknown"
-			if strings.Contains(src, "rumble.com") {
-				provider = "rumble"
-			}
-			providers = append(providers, sources.StreamProvider{
-				Name:      provider,
-				EmbedURL:  src,
-				Processor: provider,
+	// Collect mirror options
+	c.OnHTML("select.mirror", func(e *colly.HTMLElement) {
+		e.ForEach("option", func(_ int, el *colly.HTMLElement) {
+			mirrors = append(mirrors, mirrorOption{
+				label: el.Text,
+				value: el.Attr("value"),
 			})
+		})
+	})
+
+	err := c.Visit(episodeURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Process mirrors
+	for i, mirror := range mirrors {
+		// Skip first option if it's a placeholder
+		if i == 0 && (mirror.value == "" || mirror.value == "#") {
+			continue
 		}
-	})
 
-	// Add response logging
-	c.OnScraped(func(r *colly.Response) {
-		fmt.Printf("Found %d stream providers\n", len(providers))
-	})
+		decoded, err := base64.StdEncoding.DecodeString(mirror.value)
+		if err != nil {
+			logger.Logger.Printf("[Providers] Error decoding mirror %s: %v\n", mirror.label, err)
+			continue
+		}
 
-	return providers, c.Visit(episodeURL)
+		embedURL := extractEmbedURL(string(decoded))
+		if embedURL == "" {
+			continue
+		}
+
+		name, processor := detectProvider(embedURL, mirror.label)
+		providers = append(providers, sources.StreamProvider{
+			Name:      name,
+			EmbedURL:  embedURL,
+			Processor: processor,
+		})
+
+		logger.Logger.Printf("[Providers] Found: %s (%s)\n", name, embedURL)
+	}
+
+	if len(providers) == 0 {
+		return nil, fmt.Errorf("no valid stream providers found for: %s", episodeURL)
+	}
+
+	return providers, nil
 }

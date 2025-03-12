@@ -14,3 +14,9 @@ providers:
   rumble:
     name: "Rumble"
     processor: "rumble"
+
+player:
+  default: "vlc"  # can be mpv or vlc
+  paths:
+    mpv: "mpv"    # path to mpv executable
+    vlc: "vlc"    # path to vlc executable
