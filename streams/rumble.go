@@ -11,7 +11,6 @@ func processRumbleEmbed(embedURL string) (string, error) {
 
 	c := colly.NewCollector()
 
-	var jsonData string
 	var err error
 	videoURL := embedURL
 	c.OnHTML("script", func(e *colly.HTMLElement) {
