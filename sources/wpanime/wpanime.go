@@ -3,6 +3,7 @@ package wpanime
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/gocolly/colly"
 	"github.com/umesh-verma/anigo/logger"
@@ -54,8 +55,12 @@ func (w *WPAnimeSource) Search(term string) ([]sources.ShowInfo, error) {
 }
 
 func (w *WPAnimeSource) GetEpisodes(showURL string) ([]sources.EpisodeInfo, error) {
-	c := colly.NewCollector()
+	c := colly.NewCollector(
+		colly.Async(true), // Enable async processing
+		colly.MaxDepth(1),
+	)
 	episodes := []sources.EpisodeInfo{}
+	var mu sync.Mutex
 
 	c.OnRequest(func(r *colly.Request) {
 		logger.Logger.Printf("[Episodes] Fetching from URL: %s\n", r.URL.String())
@@ -67,6 +72,7 @@ func (w *WPAnimeSource) GetEpisodes(showURL string) ([]sources.EpisodeInfo, erro
 		number := e.ChildText(".epl-num")
 		date := e.ChildText(".epl-date")
 
+		mu.Lock()
 		episodes = append(episodes, sources.EpisodeInfo{
 			Title:    title,
 			URL:      url,
@@ -74,13 +80,20 @@ func (w *WPAnimeSource) GetEpisodes(showURL string) ([]sources.EpisodeInfo, erro
 			Date:     date,
 			Provider: "default",
 		})
+		mu.Unlock()
 	})
 
 	c.OnScraped(func(r *colly.Response) {
 		logger.Logger.Printf("[Episodes] Found total episodes: %d\n", len(episodes))
 	})
 
-	return episodes, c.Visit(showURL)
+	err := c.Visit(showURL)
+	if err != nil {
+		return nil, err
+	}
+
+	c.Wait()
+	return episodes, nil
 }
 
 func (w *WPAnimeSource) GetStreamProviders(episodeURL string) ([]sources.StreamProvider, error) {

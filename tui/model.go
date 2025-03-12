@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -38,18 +39,6 @@ var (
 			Light: "#626262",
 			Dark:  "#DDD",
 		})
-
-	itemStyle = lipgloss.NewStyle().
-			PaddingLeft(4)
-
-	searchStyle = lipgloss.NewStyle().
-			PaddingTop(2).
-			PaddingBottom(2).
-			PaddingLeft(4).
-			Width(50)
-
-	searchPromptStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FFD700"))
 )
 
 type ListItem struct {
@@ -107,11 +96,15 @@ type Model struct {
 	shows         []sources.ShowInfo
 	episodeList   list.Model
 	episodes      []sources.EpisodeInfo
+	spinner       spinner.Model
+	loading       bool
+	loadingMsg    string
 }
 
-func New(sources map[string]sources.SourceProvider) Model {
+// Change New to return *Model
+func New(sources map[string]sources.SourceProvider) *Model {
 	items := make([]list.Item, 0, len(sources))
-	for id, _ := range sources {
+	for id := range sources { // simplified range
 		items = append(items, sourceItem{
 			name: id,
 			id:   id,
@@ -123,7 +116,7 @@ func New(sources map[string]sources.SourceProvider) Model {
 	sourceList.SetShowHelp(true)
 
 	input := textinput.New()
-	input.Placeholder = "Type to filter sources..."
+	input.Placeholder = "Type to search anime..." // Update placeholder
 	input.Width = 30
 
 	showList := list.New(nil, list.NewDefaultDelegate(), 0, 0)
@@ -134,7 +127,11 @@ func New(sources map[string]sources.SourceProvider) Model {
 	episodeList.Title = "Episodes"
 	episodeList.SetShowHelp(true)
 
-	return Model{
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700"))
+
+	return &Model{
 		currentScreen: sourceSelect,
 		sources:       sources,
 		sourceList:    sourceList,
@@ -142,16 +139,32 @@ func New(sources map[string]sources.SourceProvider) Model {
 		list:          list.New(nil, list.NewDefaultDelegate(), 0, 0),
 		showList:      showList,
 		episodeList:   episodeList,
+		spinner:       s,
+		loading:       false,
 	}
 }
 
-func (m Model) Init() tea.Cmd {
-	return nil
+func (m *Model) Init() tea.Cmd {
+	return tea.Batch(m.spinner.Tick)
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) { // changed to pointer receiver
+	var cmds []tea.Cmd
 
+	switch msg := msg.(type) {
+	case spinner.TickMsg:
+		if m.loading {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			cmds = append(cmds, cmd, m.spinner.Tick)
+		}
+	case error:
+		m.err = msg
+		m.loading = false
+		return m, nil
+	}
+
+	var cmd tea.Cmd
 	switch m.currentScreen {
 	case sourceSelect:
 		return m.updateSourceSelect(msg)
@@ -163,12 +176,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateProviderList(msg)
 	case qualityList:
 		m.list, cmd = m.list.Update(msg)
-		return m, cmd
 	}
-	return m, nil
+
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	return m, tea.Batch(cmds...)
 }
 
-func (m Model) updateSourceSelect(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) updateSourceSelect(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -179,35 +196,38 @@ func (m Model) updateSourceSelect(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		// Handle input updates when search is focused
 		if m.searchInput.Focused() {
 			switch msg.Type {
 			case tea.KeyTab, tea.KeyEsc:
 				m.searchInput.Blur()
 				return m, nil
 			case tea.KeyEnter:
+				m.loading = true
+				m.loadingMsg = "Searching..."
 				if i, ok := m.sourceList.SelectedItem().(sourceItem); ok {
 					m.selectedID = i.id
 					m.currentScreen = showList
-					return m, m.performSearch
+					return m, m.performSearch()
 				}
 			default:
 				var cmd tea.Cmd
 				m.searchInput, cmd = m.searchInput.Update(msg)
-				// Filter the list based on search input
-				return m, tea.Batch(cmd, m.filterSources)
+				return m, cmd
 			}
 		} else {
-			// Handle list navigation when search is not focused
 			switch msg.String() {
-			case "tab":
+			case "tab": // Changed from "/" to "tab"
 				m.searchInput.Focus()
 				return m, nil
 			case "enter":
 				if i, ok := m.sourceList.SelectedItem().(sourceItem); ok {
 					m.selectedID = i.id
-					m.currentScreen = showList
-					return m, m.performSearch
+					if m.searchInput.Value() != "" {
+						m.loading = true
+						m.loadingMsg = "Searching..."
+						m.currentScreen = showList
+						return m, m.performSearch()
+					}
 				}
 			case "q", "ctrl+c":
 				return m, tea.Quit
@@ -220,36 +240,25 @@ func (m Model) updateSourceSelect(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// Add this new method to filter sources
-func (m Model) filterSources() tea.Msg {
-	filterValue := m.searchInput.Value()
-	filteredItems := make([]list.Item, 0)
+// Remove filterSources function as we don't need it anymore
 
-	for id := range m.sources {
-		if strings.Contains(strings.ToLower(id), strings.ToLower(filterValue)) {
-			filteredItems = append(filteredItems, sourceItem{
-				name: id,
-				id:   id,
-			})
+func (m *Model) performSearch() tea.Cmd { // changed to return tea.Cmd
+	return func() tea.Msg {
+		if provider, ok := m.sources[m.selectedID]; ok {
+			shows, err := provider.Search(m.searchInput.Value())
+			if err != nil {
+				m.loading = false
+				return err
+			}
+			m.loading = false
+			return shows
 		}
+		m.loading = false
+		return fmt.Errorf("no provider found for ID: %s", m.selectedID)
 	}
-
-	m.sourceList.SetItems(filteredItems)
-	return nil
 }
 
-func (m Model) performSearch() tea.Msg {
-	if provider, ok := m.sources[m.selectedID]; ok {
-		shows, err := provider.Search(m.searchInput.Value())
-		if err != nil {
-			return err
-		}
-		return shows
-	}
-	return fmt.Errorf("no provider found for ID: %s", m.selectedID)
-}
-
-func (m Model) updateShowList(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) updateShowList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case error:
 		m.err = msg
@@ -295,13 +304,9 @@ func (m Model) updateShowList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if i, ok := m.showList.SelectedItem().(showItem); ok {
 				m.currentScreen = episodeList
-				return m, func() tea.Msg {
-					episodes, err := m.sources[m.selectedID].GetEpisodes(i.url)
-					if err != nil {
-						return err
-					}
-					return episodes
-				}
+				m.loading = true
+				m.loadingMsg = "Loading episodes..."
+				return m, m.fetchEpisodes(i.url)
 			}
 		case "esc":
 			m.currentScreen = sourceSelect
@@ -316,7 +321,18 @@ func (m Model) updateShowList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) updateEpisodeList(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) fetchEpisodes(url string) tea.Cmd {
+	return func() tea.Msg {
+		episodes, err := m.sources[m.selectedID].GetEpisodes(url)
+		m.loading = false
+		if err != nil {
+			return err
+		}
+		return episodes
+	}
+}
+
+func (m *Model) updateEpisodeList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case []sources.EpisodeInfo:
 		m.episodes = msg
@@ -335,6 +351,7 @@ func (m Model) updateEpisodeList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.episodeList.Title = fmt.Sprintf("Episodes (%d)", len(msg))
 		m.episodeList.SetItems(items)
+		m.loading = false
 
 		// Ensure proper sizing
 		if m.width > 0 {
@@ -374,26 +391,41 @@ func (m Model) updateEpisodeList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) updateProviderList(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Similar implementation for provider selection
+func (m *Model) updateProviderList(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+		// Add more cases as needed
+	}
 	return m, nil
 }
 
-func (m Model) View() string {
+func (m *Model) View() string {
 	if m.err != nil {
 		return "Error: " + m.err.Error()
+	}
+
+	if m.loading {
+		return docStyle.Render(
+			lipgloss.JoinVertical(lipgloss.Center,
+				titleStyle.Render(m.loadingMsg),
+				m.spinner.View(),
+			),
+		)
 	}
 
 	switch m.currentScreen {
 	case sourceSelect:
 		// Create horizontal layout
 		searchSection := lipgloss.JoinVertical(lipgloss.Left,
-			titleStyle.Render("Search"),
+			titleStyle.Render("Search Anime"),
 			searchBarStyle.Render(m.searchInput.View()),
 		)
 
 		listSection := lipgloss.JoinVertical(lipgloss.Left,
-			titleStyle.Render("Sources"),
+			titleStyle.Render("Select Source"),
 			listStyle.Render(m.sourceList.View()),
 		)
 
@@ -404,9 +436,9 @@ func (m Model) View() string {
 		)
 
 		// Help text at bottom
-		helpText := "tab: switch focus • enter: select • q: quit"
+		helpText := "tab: focus search • ↑/↓: navigate • enter: select • q: quit" // Updated help text
 		if m.searchInput.Focused() {
-			helpText = "esc: unfocus • enter: select • type to filter"
+			helpText = "enter: search • tab/esc: unfocus • q: quit" // Updated help text
 		}
 
 		return docStyle.Render(
@@ -430,7 +462,6 @@ func (m Model) View() string {
 		s.WriteString(titleStyle.Render(fmt.Sprintf("Search Results for: %s", m.searchInput.Value())))
 		s.WriteString("\n\n")
 
-		// Apply full-width styling to the list
 		listView := listStyle.Copy().
 			Width(m.width - 4).
 			Render(m.showList.View())
@@ -438,7 +469,6 @@ func (m Model) View() string {
 		s.WriteString(listView)
 		s.WriteString("\n")
 		s.WriteString(statusMessageStyle.Render("↑/↓: navigate • enter: select show • esc: back • q: quit"))
-
 		return docStyle.Render(s.String())
 
 	case episodeList:
@@ -472,6 +502,6 @@ func (m Model) View() string {
 }
 
 // Add this method to expose the selected field
-func (m Model) Selected() *streams.VideoData {
+func (m *Model) Selected() *streams.VideoData {
 	return m.selected.(*streams.VideoData)
 }

@@ -34,8 +34,7 @@ func main() {
 	}
 
 	// Start TUI
-	m := tui.New(sources)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(tui.New(sources), tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v\n", err)
