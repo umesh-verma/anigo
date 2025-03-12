@@ -16,12 +16,11 @@ type VideoData struct {
 
 var videoList []VideoData
 
-func ProcessRumbleEmbed(embedURL string) (string, error) {
-
+func ProcessRumbleEmbed(embedURL string) ([]VideoData, error) {
 	c := colly.NewCollector()
-
+	videoList = []VideoData{}
 	var err error
-	var videoURL string
+
 	c.OnHTML("script", func(e *colly.HTMLElement) {
 		body := e.Text
 		var jsonData string
@@ -31,7 +30,6 @@ func ProcessRumbleEmbed(embedURL string) (string, error) {
 
 			if endIdx != -1 {
 				jsonData = body[startIdx+12 : startIdx+endIdx]
-
 			}
 
 			// Temporary map to parse the JSON data
@@ -45,15 +43,11 @@ func ProcessRumbleEmbed(embedURL string) (string, error) {
 				} `json:"meta"`
 			}
 
-			// Complete the JSON structure for parsing
-			err := json.Unmarshal([]byte(jsonData), &tempVideoMap)
+			err = json.Unmarshal([]byte(jsonData), &tempVideoMap)
 			if err != nil {
-				fmt.Println("Error parsing JSON:", err)
 				return
 			}
 
-			// Convert the map to our slice of VideoData
-			videoList = []VideoData{}
 			for resolution, data := range tempVideoMap {
 				videoList = append(videoList, VideoData{
 					URL:        data.URL,
@@ -61,24 +55,6 @@ func ProcessRumbleEmbed(embedURL string) (string, error) {
 					Resolution: resolution,
 				})
 			}
-
-			fmt.Println("Available Video Qualities:")
-			for i, data := range videoList {
-				fmt.Printf("%d. Resolution: %sp", i+1, data.Resolution)
-				fmt.Printf("  Size: %d MB \n", data.Size/(1024*1024))
-			}
-
-			var selectedIndex int
-			fmt.Println("Select a video quality (enter number):")
-			fmt.Scanln(&selectedIndex)
-
-			if selectedIndex <= 0 || selectedIndex > len(videoList) {
-				fmt.Println("Invalid selection")
-				return
-			}
-
-			videoURL = videoList[selectedIndex-1].URL
-
 		}
 	})
 
@@ -88,12 +64,13 @@ func ProcessRumbleEmbed(embedURL string) (string, error) {
 
 	err = c.Visit(embedURL)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	if videoURL == "" {
-		return "", fmt.Errorf("no video URL found in Rumble embed: %s", embedURL)
+	if len(videoList) == 0 {
+		return nil, fmt.Errorf("no video URLs found in Rumble embed: %s", embedURL)
 	}
+
 	c.Wait()
-	return videoURL, nil
+	return videoList, nil
 }

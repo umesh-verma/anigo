@@ -1,0 +1,16 @@
+sources:
+  donghuastream:
+    name: "DonghuaStream"
+    type: "wp-anime"
+    base_url: "https://donghuastream.org"
+    search_path: ""
+  animekhor:
+    name: "AnimeKhor"
+    type: "wp-anime"
+    base_url: "https://animekhor.com"
+    search_path: ""
+
+providers:
+  rumble:
+    name: "Rumble"
+    processor: "rumble"
