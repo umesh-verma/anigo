@@ -4,17 +4,34 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
-	"github.com/umesh-verma/anigo/streams"
+
 	"github.com/gocolly/colly"
+	"github.com/umesh-verma/anigo/streams"
 )
 
-const baseURL = "https://www.animekhor.org"
+const baseURL = "https://www.Donghuastream.org"
 
 type Show struct {
 	Title   string
 	ShowURL string
 }
+
+type Episode struct {
+	URL   string
+	Title string
+}
+
+type MirrorOption struct {
+	Label string
+	Value string
+}
+type ProviderInfo struct {
+	Name     string
+	EmbedURL string
+}
+
 type VideoQuality struct {
 	URL         string
 	Indicator   string
@@ -27,59 +44,56 @@ type VideoQuality struct {
 }
 
 func main() {
+
+	//search for a show
 	var search string
 	fmt.Println("Enter search term:")
 	fmt.Scanln(&search)
 	search = "/?s=" + search
-	searchResult := getShows(search)
-	for i, show := range searchResult {
-		fmt.Printf("%d: Title: %s, URL: %s\n", i, show.Title, show.ShowURL)
+	showURL, showName := getShows(search)
+	episodeURL, episodeTitle := getEpisodes(showURL, showName)
+
+	//get streaming URL
+	streamURL, err := getStreamingURL(episodeURL)
+	if err != nil {
+		log.Fatal(err)
 	}
-	var selectedShow int
-	fmt.Println("Select a show by number:")
-	_, err := fmt.Scanln(&selectedShow)
-	if err != nil || selectedShow < 0 || selectedShow >= len(searchResult) {
-		log.Fatalf("Invalid selection: %v", err)
-	}
-	showURL := searchResult[selectedShow].ShowURL
-	getEpisodes(showURL)
+	fmt.Printf("\nStreaming URL for %s: %s\n", episodeTitle, streamURL)
+
 }
 
-func getEpisodes(showURL string) {
+func getEpisodes(showURL string, showName string) (string, string) {
 	c := colly.NewCollector()
-	episodes := make(map[int]string)
+	allEpisodes := []Episode{}
 
-	c.OnRequest(func(r *colly.Request) { fmt.Println("\nFetching episodes...") })
+	c.OnRequest(func(r *colly.Request) { fmt.Printf("\nFetching %s episodes...", showName) })
 	c.OnError(func(r *colly.Response, err error) { fmt.Println("Something went wrong:", err) })
 	c.OnResponse(func(r *colly.Response) { fmt.Println("\nFound all episodes") })
 
-	i := 0
 	c.OnHTML("div.eplister > ul > li > a", func(e *colly.HTMLElement) {
-		episodeURL := e.Attr("href")
-		episodes[i] = episodeURL
-		fmt.Printf("%d: %s\n", i, e.ChildText(".epl-title"))
-		i++
+		allEpisodes = append(allEpisodes, Episode{
+			URL:   e.Attr("href"),
+			Title: e.ChildText(".epl-title"),
+		})
 	})
 	c.Visit(showURL)
+
+	slices.Reverse(allEpisodes)
+	for i, episode := range allEpisodes {
+		fmt.Printf("%d: %s\n", i+1, episode.Title)
+	}
 
 	var selectedEpisode int
 	fmt.Print("\nSelect episode number: ")
 	fmt.Scanln(&selectedEpisode)
 
-	if episodeURL, ok := episodes[selectedEpisode]; ok {
-		streamURL, err := getStreamingURL(episodeURL)
-		if err != nil {
-			fmt.Printf("Error getting stream URL: %v\n", err)
-			return
-		}
-		if streamURL == "" {
-			fmt.Println("No streaming URL found")
-			return
-		}
-		fmt.Printf("\nStreaming URL: %s\n", streamURL)
+	if selectedEpisode > 0 && selectedEpisode <= len(allEpisodes) {
+		return allEpisodes[selectedEpisode-1].URL, allEpisodes[selectedEpisode-1].Title
 	} else {
 		fmt.Println("Invalid episode selection")
+		return "", ""
 	}
+
 }
 
 func htmlExcerpt(text string, maxLen int) string {
@@ -94,10 +108,7 @@ func getStreamingURL(episodeURL string) (string, error) {
 		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
 	)
 
-	var optionsList []struct {
-		Label string
-		Value string
-	}
+	optionsList := []MirrorOption{}
 
 	// Debug callbacks
 	c.OnRequest(func(r *colly.Request) {
@@ -118,10 +129,7 @@ func getStreamingURL(episodeURL string) (string, error) {
 		e.ForEach("option", func(i int, el *colly.HTMLElement) {
 			value := el.Attr("value")
 			label := el.Text
-			optionsList = append(optionsList, struct {
-				Label string
-				Value string
-			}{
+			optionsList = append(optionsList, MirrorOption{
 				Label: label,
 				Value: value,
 			})
@@ -151,10 +159,7 @@ func getStreamingURL(episodeURL string) (string, error) {
 
 	// Print decoded values for all options and extract provider info
 	fmt.Println("\n--- Available Providers ---")
-	type ProviderInfo struct {
-		Name     string
-		EmbedURL string
-	}
+
 	providers := make([]ProviderInfo, 0, len(optionsList))
 
 	for i, opt := range optionsList {
@@ -201,8 +206,13 @@ func getStreamingURL(episodeURL string) (string, error) {
 				Name:     providerName,
 				EmbedURL: embedURL,
 			})
+			// If this is the first provider, remove it
+			if i == 0 {
+				providers = providers[1:]
+			} else {
+				fmt.Printf("%d: %s\n", i, providerName)
+			}
 
-			fmt.Printf("%d: %s -> %s\n", i, providerName, embedURL)
 		} else {
 			fmt.Printf("%d: %s -> [Error decoding: %v]\n", i, opt.Label, err)
 			providers = append(providers, ProviderInfo{
@@ -211,29 +221,28 @@ func getStreamingURL(episodeURL string) (string, error) {
 		}
 	}
 	var selectedProvider int
-	fmt.Print("\nSelect provider number (default 0): ")
+	fmt.Print("\nSelect provider number: ")
 	fmt.Scanln(&selectedProvider)
 
-	if selectedProvider < 0 || selectedProvider >= len(providers) {
-		selectedProvider = 0
-		fmt.Println("Invalid selection, using default provider (0)")
+	if selectedProvider < 1 || selectedProvider > len(providers) {
+		fmt.Println("Invalid selection")
 	}
 
 	// Get the selected provider info
-	selected := providers[selectedProvider]
+	selected := providers[selectedProvider-1]
 	fmt.Printf("\nSelected provider: %s\n", selected.Name)
 
 	// Process based on provider type
 	switch {
 	case strings.EqualFold(selected.Name, "Rumble"):
-		return streams.processRumbleEmbed(selected.EmbedURL)
+		return streams.ProcessRumbleEmbed(selected.EmbedURL)
 	default:
 		return processGenericEmbed(selected.EmbedURL)
 
 	}
 }
 
-func getShows(search string) []Show {
+func getShows(search string) (showURL string, showName string) {
 	url := baseURL + search
 
 	c := colly.NewCollector()
@@ -248,7 +257,19 @@ func getShows(search string) []Show {
 		})
 	})
 	c.Visit(url)
-	return searchResult
+	for i, show := range searchResult {
+		fmt.Printf("%d %s, \n", i, show.Title)
+	}
+	var selectedShow int
+
+	fmt.Println("Select a show by number:")
+	_, err := fmt.Scanln(&selectedShow)
+	if err != nil || selectedShow < 0 || selectedShow >= len(searchResult) {
+		log.Fatalf("Invalid selection: %v", err)
+	}
+	showName1 := searchResult[selectedShow].Title
+	showURL1 := searchResult[selectedShow].ShowURL
+	return showURL1, showName1
 }
 
 func processGenericEmbed(embedURL string) (string, error) {
